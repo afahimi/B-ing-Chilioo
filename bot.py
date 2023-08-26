@@ -21,6 +21,8 @@ message_reactions = {}
 
 events = []
 
+exclude = []
+
 class Event:
     def __init__(self, users, channel_id, message_ts, event_date):
         self.users = users
@@ -66,6 +68,7 @@ bot_user_id = get_bot_user_id()
 
 
 def refresh_queue():
+    user_queue.clear()
     try:
         # Get the bot's own ID
         bot_id = client.auth_test()["user_id"]
@@ -79,6 +82,9 @@ def refresh_queue():
 
             random.shuffle(members)
             user_queue.extend(members)
+
+            for user in exclude:
+                user_queue.remove(user)
         else:
             print("Failed to fetch channel members:", result["error"])
     except Exception as e:
@@ -107,9 +113,113 @@ def get_queue():
         result += f"<@{user}>\n"
     return result
 
+def find_user_by_handle(handle):
+    handle_to_find = handle.lstrip('@')
+    result = client.users_list()
+    if result["ok"]:
+        users = result["members"]
+        for user in users:
+            if user["name"] == handle_to_find:
+                return user["id"]
+    return None
+    
+
 
 # head of queue is on the right, tail on the left
 # add to the queue: appendLeft, pop from queue: pop()
+@app.route("/chill-help", methods=["POST"])
+def chill_help():
+    result = ""
+    result += " *COMMANDS:* \n"
+    result += " /chill-create: Creates a picnic event. \n"
+    result += " /chill-delete: Deletes a picnic event. \n"
+    result += " /chill-queue: Displays the current queue. \n"
+    result += " /chill-shuffle: Shuffles the queue. \n"
+    result += " /chill-edit: Edits the queue.  Written as Swap, Include or Exclude followed by user handles.\n"
+    result += " /chill-event: Displays the current picnic event. \n"
+    result += " /chill-excluded: Displays the current excluded users. \n"
+    return make_response(result, 200)
+
+@app.route("/chill-excluded", methods=["POST"])
+def chill_excluded():
+    result = ""
+    result += " EXCLUDED USERS: \n"
+    for user in exclude:
+        result += f"<@{user}>\n"
+    return make_response(result, 200)
+
+@app.route("/chill-event", methods=["POST"])
+def chill_event():
+    if not events:
+        return make_response("There is no picnic event in progress!", 200)
+    if events[0].event_date < datetime.now():
+        return make_response("The picnic event has already passed!", 200)
+    if events[0].event_date > datetime.now():
+        return make_response(f"The picnic event is scheduled for {events[0].event_date.strftime('%B %d, %Y')}.\n Planners have been chosen to be {' '.join([f'<@{user}>' for user in events[0].users])}.", 200)
+    
+
+@app.route("/chill-edit", methods=["POST"]) # ARSG: TYPE (SWAP OR EXCLUDE), + either (USER_ID1 USERID2) or (USER_ID)
+def edit_chill():
+    text = request.form['text']
+    arg1, arg2, arg3 = (text.split() + [None, None, None])[:3]
+
+    if not arg1:
+        return make_response("Please enter a valid command.", 200)
+
+    if(arg1.lower() == "swap"):
+        if(not arg2 or not arg3):
+            return make_response("Please enter two user handles to swap.", 200)
+        if(arg2 == arg3):
+            return make_response("Please enter two different user handles to swap.", 200)
+        
+        arg2_id = find_user_by_handle(arg2)
+        arg3_id = find_user_by_handle(arg3)
+
+        if(not arg2_id or not arg3_id):
+            return make_response("Please enter valid user handles.", 200)
+        if(arg2_id not in user_queue and arg3_id not in user_queue):
+            return make_response("Please enter user handles that are in the queue.", 200)
+        
+        current_list = events[0].users
+
+        if(arg2_id not in current_list and arg3_id not in current_list):
+            return make_response("Please enter user handles that are in the event.", 200)
+        if(arg2_id in current_list):
+            current_list[current_list.index(arg2_id)] = arg3_id
+            user_queue.remove(arg3_id)
+            user_queue.appendleft(arg2_id)
+        else:
+            current_list[current_list.index(arg3_id)] = arg2_id
+            user_queue.remove(arg2_id)
+            user_queue.appendleft(arg3_id)
+
+        return make_response(f"<@{arg2_id}> and <@{arg3_id}> have been swapped.", 200)
+
+    if(arg1.lower() == "exclude"):
+
+        arg2_id = find_user_by_handle(arg2)
+
+        if not arg2_id in user_queue:
+            return make_response("Please enter a user handle that is in the queue.", 200)
+        if arg2_id in exclude:
+            return make_response("User is already excluded.", 200)
+        if events and arg2_id in events[0].users:
+            return make_response("User is already in the event.", 200)
+        exclude.append(arg2_id)
+        user_queue.remove(arg2_id)
+        return make_response(f"{arg2} has been excluded.", 200)
+    
+    if(arg1.lower() == "include"):
+
+        arg2_id = find_user_by_handle(arg2)
+
+        if not arg2_id in exclude:
+            return make_response("Please enter a user handle that is excluded.", 200)
+        exclude.remove(arg2_id)
+        user_queue.appendleft(arg2_id)
+        return make_response(f"{arg2} has been included.", 200)
+
+    return make_response("Please enter a valid command.", 200)
 
 @app.route("/chill-shuffle", methods=["POST"])
 def chill_shuffle():
@@ -120,11 +230,21 @@ def chill_shuffle():
 @app.route("/chill-queue", methods=["POST"])
 def chill_queue():
     result = get_queue()
-    # client.chat_postMessage(
-    #     channel=get_channel_id("general"),
-    #     text=result,
-    # )
     return make_response(result, 200)
+
+@app.route("/chill-delete", methods=["POST"])
+def chill_delete():
+    if not events:
+        return make_response("There is no picnic event in progress!", 200)
+    
+    client.chat_postMessage(
+        channel=events[0].channel_id,
+        text=f"The picnic event has been cancelled.\n Deleted Event: {events[0].event_date.strftime('%B %d, %Y')}.\n Planners were {' '.join([f'<@{user}>' for user in events[0].users])}."
+    )
+    for user in events[0].users:
+        user_queue.appendleft(user)
+    del events[0]
+    return make_response("Picnic event has been cancelled.", 200)
 
 @app.route("/chill-create", methods=["POST"])
 def chill_create():
@@ -147,8 +267,7 @@ def chill_create():
     if not user_queue or len(user_queue) < 4:
         refresh_queue()
         if len(user_queue) < 4:
-            print("Not enough users for a picnic!")
-            return make_response("", 200)
+            return make_response("Not enough users for a picnic!", 200)
 
     users = [user_queue.pop() for i in range(4)]
 
@@ -371,3 +490,54 @@ def interactive2():
 
 if __name__ == "__main__":
     app.run(debug=True)
+
+
+"""
+NOTE: These are the formats you should follow when creating a dialogue box for chill-edit
+
+"elements": [
+            {
+                "label": "What's your favorite color?",
+                "name": "color",
+                "type": "text",
+                "hint": "e.g., blue or green"
+            }
+        ]
+
+
+
+
+"elements": [
+            {
+                "label": "Select your character",
+                "type": "select",
+                "name": "color_selection",
+                "option_groups": [
+                    {
+                        "label": "Characters",
+                        "options": [
+                            {
+                                "label": "Maru",
+                                "value": "maru"
+                            },
+                            {
+                                "label": "Lil Bub",
+                                "value": "lilbub"
+                            },
+                            {
+                                "label": "Hamilton the Hipster Cat",
+                                "value": "hamilton"
+                            }
+                        ]
+                    }
+                ]
+            },
+            {
+                "label": "What's your favorite color?",
+                "name": "color",
+                "type": "text",
+                "hint": "e.g., blue or green"
+            }
+        ]
+    }
+"""
