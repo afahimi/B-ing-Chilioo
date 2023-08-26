@@ -1,0 +1,5 @@
+slackclient
+slack
+flask
+slackeventsapi
+requests
